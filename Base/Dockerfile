@@ -1,87 +1,103 @@
 FROM ubuntu:focal-20210401
-LABEL authors="Selenium <selenium-developers@googlegroups.com>"
 
-#================================================
-# Customize sources for apt-get
-#================================================
-RUN  echo "deb http://archive.ubuntu.com/ubuntu focal main universe\n" > /etc/apt/sources.list \
-  && echo "deb http://archive.ubuntu.com/ubuntu focal-updates main universe\n" >> /etc/apt/sources.list \
-  && echo "deb http://security.ubuntu.com/ubuntu focal-security main universe\n" >> /etc/apt/sources.list
+LABEL \
+    "com.trilogy.company"="aurea" \
+    "com.trilogy.team"="eng.qa.integration" \
+    "com.trilogy.product"="generic" \
+    "com.trilogy.service"="jenkins-agent" \
+    "com.trilogy.stage"="dev" \
+    "com.trilogy.maintainer.skype"="asuwalka" \
+    "com.trilogy.maintainer.email"="ajay.suwalka@aurea.com"
 
 # No interactive frontend during docker build
 ENV DEBIAN_FRONTEND=noninteractive \
     DEBCONF_NONINTERACTIVE_SEEN=true
 
-#========================
-# Miscellaneous packages
-# Includes minimal runtime used for executing non GUI Java programs
-#========================
-RUN apt-get -qqy update \
-  && apt-get -qqy --no-install-recommends install \
-    bzip2 \
-    ca-certificates \
-    openjdk-11-jre-headless \
-    tzdata \
-    sudo \
-    unzip \
-    wget \
-    jq \
-    curl \
-    supervisor \
-    gnupg2 \
-  && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
-  && sed -i 's/securerandom\.source=file:\/dev\/random/securerandom\.source=file:\/dev\/urandom/' ./usr/lib/jvm/java-11-openjdk-amd64/conf/security/java.security
+USER root
 
-#===================
-# Timezone settings
-# Possible alternative: https://github.com/docker/docker/issues/3359#issuecomment-32150214
-#===================
-ENV TZ "UTC"
-RUN echo "${TZ}" > /etc/timezone \
-  && dpkg-reconfigure --frontend noninteractive tzdata
+WORKDIR /home/ubuntuadmin
 
-#========================================
-# Add normal user and group with passwordless sudo
-#========================================
-RUN groupadd seluser \
-         --gid 1201 \
-  && useradd seluser \
-         --create-home \
-         --gid 1201 \
-         --shell /bin/bash \
-         --uid 1200 \
-  && usermod -a -G sudo seluser \
-  && echo 'ALL ALL = (ALL) NOPASSWD: ALL' >> /etc/sudoers \
-  && echo 'seluser:secret' | chpasswd
-ENV HOME=/home/seluser
+ENV JENKINS_HOME /home/ubuntuadmin
+ENV _JAVA_OPTS -Dcom.sun.security.enableAIAcaIssuers=true
 
-#======================================
-# Add Grid check script
-#======================================
-COPY check-grid.sh entry_point.sh /opt/bin/
+RUN apt-get -yqq update
+RUN apt-get install -y --fix-missing locales && locale-gen en_US.UTF-8
 
-#======================================
-# Add Supervisor configuration file
-#======================================
-COPY supervisord.conf /etc
+RUN apt-get -yqq update && \
+    apt-get install -yqq gnupg2 wget openssh-server imagemagick git \
+    freetds-dev freetds-bin unixodbc-dev tdsodbc gcc libpq-dev python3-dev build-essential libaio-dev libssl-dev software-properties-common unzip openjdk-8-jdk
 
-#==========
-# Selenium & relaxing permissions for OpenShift and other non-sudo environments
-#==========
-RUN  mkdir -p /opt/selenium /opt/selenium/assets /var/run/supervisor /var/log/supervisor \
-  && touch /opt/selenium/config.toml \
-  && chmod -R 777 /opt/selenium /opt/selenium/assets /var/run/supervisor /var/log/supervisor /etc/passwd \
-  && wget --no-verbose https://github.com/SeleniumHQ/docker-selenium/raw/beta-jars/selenium-server-4.0.0-prerelease-beta-4-a51085a604.jar \
-   -O /opt/selenium/selenium-server.jar \
-  # && wget --no-verbose https://selenium-release.storage.googleapis.com/4.0-beta-3/selenium-server-4.0.0-beta-3.jar \
-  #   -O /opt/selenium/selenium-server.jar \
-  && chgrp -R 0 /opt/selenium ${HOME} /opt/selenium/assets /var/run/supervisor /var/log/supervisor \
-  && chmod -R g=u /opt/selenium ${HOME} /opt/selenium/assets /var/run/supervisor /var/log/supervisor
+RUN wget -q https://www.browserstack.com/browserstack-local/BrowserStackLocal-linux-x64.zip && \
+    unzip BrowserStackLocal-linux-x64.zip && \
+    rm BrowserStackLocal-linux-x64.zip && \
+    chmod +x BrowserStackLocal
 
-#===================================================
-# Run the following commands as non-privileged user
-#===================================================
-USER 1200:1201
+RUN wget -q https://archive.apache.org/dist/tinkerpop/3.3.4/apache-tinkerpop-gremlin-console-3.3.4-bin.zip && \
+    unzip apache-tinkerpop-gremlin-console-3.3.4-bin.zip -d /home && \
+    rm apache-tinkerpop-gremlin-console-3.3.4-bin.zip && \
+    mv /home/apache-tinkerpop-gremlin-console-3.3.4 /home/gremlin
 
+COPY neptune-remote.yaml /home/gremlin/conf/
 
-CMD ["/opt/bin/entry_point.sh"]
+RUN echo 'alias gremlin="/home/gremlin/bin/gremlin.sh"' >> ~/.bashrc
+
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+  && sh -c 'echo "deb http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list' \
+  && apt-get update \
+  && apt-get install -yqq python3-pip python3-dev firefox tzdata google-chrome-stable \
+  && cd /usr/local/bin \
+  && ln -s /usr/bin/python3 python \
+  && pip3 install --upgrade pip
+
+# Install awscliv2
+RUN wget -q "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2.zip" \
+&& unzip awscliv2.zip \
+&& mkdir /usr/local/aws-cli-v2 \
+&& ./aws/install -i /usr/local/aws-cli-v2 -b /usr/local/bin \
+&& ln -s /usr/local/bin/aws /usr/local/bin/aws2
+
+# Install oracle dpi
+RUN wget -q "https://download.oracle.com/otn_software/linux/instantclient/19800/instantclient-basic-linux.x64-19.8.0.0.0dbru.zip" -O "instantclient-basic-linux.zip" \
+&& wget -q "https://download.oracle.com/otn_software/linux/instantclient/19800/instantclient-sdk-linux.x64-19.8.0.0.0dbru.zip" -O "instantclient-sdk-linux.zip" \
+&& unzip instantclient-basic-linux.zip \
+&& unzip instantclient-sdk-linux.zip \
+&& printf "%s/instantclient_19_8/libclntsh.so\n" "$PWD" >> /etc/ld.so.conf.d/oracle.conf
+
+RUN wget -q "https://repo.maven.apache.org/maven2/io/qameta/allure/allure-commandline/2.12.0/allure-commandline-2.12.0.tgz" -O "allure-commandline-2.12.0.tgz" && \
+    tar -zxvf allure-commandline-2.12.0.tgz -C /opt/ && ln -s /opt/allure-2.12.0/bin/allure /usr/bin/allure
+
+ENV LANG='en_US.UTF-8' LANGUAGE='en_US:en' LC_ALL='en_US.UTF-8' PORT='8080' ORACLE_HOME='/usr/src/app/instantclient_19_8'
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ORACLE_HOME
+
+RUN ldconfig
+
+ENV PATH=$HOME/.local/bin:$PATH
+# EXECUTOR_SUFFIX should be -dev on dev env and empty on prod
+ENV EXECUTOR_SUFFIX=EXECUTOR_ENV_SUFFIX
+
+RUN printf "[FreeTDS]\nDescription=FreeTDS Driver\nDriver=/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so\nSetup=/usr/lib/x86_64-linux-gnu/odbc/libtdsS.so" > /etc/odbcinst.ini
+
+# Install tesseract-ocr
+ENV TESSDATA_PREFIX=/usr/local/share/tessdata
+
+RUN add-apt-repository ppa:alex-p/tesseract-ocr && \
+    apt-get install tesseract-ocr -y && \
+    wget https://github.com/tesseract-ocr/tessdata/raw/master/eng.traineddata && \
+    mkdir -p /usr/local/share/tessdata && \
+    mv -v eng.traineddata /usr/local/share/tessdata
+
+RUN apt-get install -yqq zip jq
+
+RUN pip3 install e2e-pca-jsonpath-ng==1.5.2b20200928162102 --extra-index-url https://nexus.devfactory.com/repository/eng-pca-qe-pypi-release/simple/
+RUN pip3 install eng.pca-automation-e2e --extra-index-url https://nexus.devfactory.com/repository/eng-pca-qe-pypi-release/simple/ --trusted-host pypi.org --trusted-host nexus.devfactory.com
+
+# to support copy&paste
+RUN apt-get update && apt-get install -y xclip xvfb
+ENV DISPLAY=:99
+
+# Create Jenkins User
+RUN useradd jenkins -m -s /bin/bash
+
+RUN usermod -a -G root jenkins
+
+USER jenkins
